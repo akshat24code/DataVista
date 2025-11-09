@@ -34,8 +34,14 @@ try:
 
     # Check if running on Streamlit Cloud
     if os.getenv("STREAMLIT_SERVER_PORT"):
-        print("Running on Streamlit Cloud - using lightweight mode")
-        summarizer = None
+        print("🌐 Running on Streamlit Cloud — using ultra-light model")
+        from transformers import pipeline
+        summarizer = pipeline(
+            "summarization",
+            model="facebook/bart-large-cnn",  # smaller, still works on CPU
+            device=-1
+        )
+
     else:
         print("Running locally - loading full AI model...")
         # Set up torch configuration
@@ -46,24 +52,34 @@ try:
         model_name = "sshleifer/distilbart-cnn-6-6"
         try:
             print("Loading model and tokenizer...")
-        
             # Create the pipeline with the lightweight model
             summarizer = pipeline(
                 "summarization",
                 model=model_name,
                 device=device
             )
-    except Exception as model_error:
-        st.error(f"""
-        ⚠️ Error loading the AI model: {str(model_error)}
-        
-        Please try:
-        1. Check your internet connection
-        2. Clear your browser cache
-        3. Restart the application
-        """)
-        # Fallback to basic summarization
-        summarizer = None
+        except Exception as model_error:
+            # Handle model loading errors locally; show a Streamlit message and fallback to None
+            st.error(f"""
+            ⚠️ Error loading the AI model: {str(model_error)}
+            
+            Please try:
+            1. Check your internet connection
+            2. Clear your browser cache
+            3. Restart the application
+            """)
+            summarizer = None
+except Exception as model_error:
+    st.error(f"""
+    ⚠️ Error loading the AI model: {str(model_error)}
+    
+    Please try:
+    1. Check your internet connection
+    2. Clear your browser cache
+    3. Restart the application
+    """)
+    # Fallback to basic summarization
+    summarizer = None
         
 except ImportError:
     st.error("""
