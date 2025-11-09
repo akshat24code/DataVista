@@ -1,105 +1,78 @@
 import pandas as pd
 import streamlit as st
+import requests
 import re
-import sys
 import os
-# Allow model downloads for first initialization
-import torch
-import warnings
-warnings.filterwarnings('ignore')  # Suppress warnings
+from dotenv import load_dotenv
 
-def clean_text_for_pdf(text):
-    """Clean text by replacing problematic characters with PDF-safe alternatives."""
-    if not isinstance(text, str):
-        text = str(text)
-    
-    replacements = {
-        "—": "-", "–": "-", "'": "'", "'": "'", """: '"', """: '"', 
-        "•": "-", "…": "...", "⚡": "*", "✨": "*", "🔥": "*",
-        "📊": "[Chart]", "📈": "[Graph]", "📉": "[Graph]",
-        "✅": "[OK]", "❌": "[X]", "⚠️": "[Warning]",
-        "\n": "\n  ",  # Add some indentation for newlines
+# Load .env variables
+load_dotenv()
+
+
+# ----------------------------------------------------------
+# NVIDIA API Summarization
+# ----------------------------------------------------------
+def generate_ai_summary_via_nvidia(narrative: str, api_key: str) -> str:
+    """Use NVIDIA LLM API (Llama-4 Maverick) to summarize dataset description."""
+    invoke_url = "https://integrate.api.nvidia.com/v1/chat/completions"
+    stream = False
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "text/event-stream" if stream else "application/json",
+        "Content-Type": "application/json"
     }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
-    return text
 
-# Initialize global variable for the summarizer
-summarizer = None
+    payload = {
+        "model": "meta/llama-4-maverick-17b-128e-instruct",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an expert data analyst. Summarize dataset statistics in a human-readable, structured format."
+            },
+            {
+                "role": "user",
+                "content": narrative
+            }
+        ],
+        "max_tokens": 512,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "stream": stream
+    }
 
-# Try to import and initialize transformers
-try:
-    import os
-    from transformers import pipeline
+    try:
+        response = requests.post(invoke_url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        st.warning(f"⚠️ NVIDIA API summarization failed: {e}")
+        return narrative
 
-    # Check if running on Streamlit Cloud
-    if os.getenv("STREAMLIT_SERVER_PORT"):
-        print("Running on Streamlit Cloud - using lightweight mode")
-        summarizer = None
-    else:
-        print("Running locally - loading full AI model...")
-        # Set up torch configuration
-        torch.set_grad_enabled(False)  # Disable gradients for inference
-        device = 0 if torch.cuda.is_available() else -1  # Use GPU if available
-        
-        # Initialize with a smaller model for better compatibility
-        model_name = "sshleifer/distilbart-cnn-6-6"
-        try:
-            print("Loading model and tokenizer...")
-        
-            # Create the pipeline with the lightweight model
-            summarizer = pipeline(
-                "summarization",
-                model=model_name,
-                device=device
-            )
-    except Exception as model_error:
-        st.error(f"""
-        ⚠️ Error loading the AI model: {str(model_error)}
-        
-        Please try:
-        1. Check your internet connection
-        2. Clear your browser cache
-        3. Restart the application
-        """)
-        # Fallback to basic summarization
-        summarizer = None
-        
-except ImportError:
-    st.error("""
-    ⚠️ Required packages are not installed correctly.
-    
-    Please run these commands in your terminal:
-    ```
-    D:/DataVista/.venv/Scripts/pip.exe install --upgrade pip
-    D:/DataVista/.venv/Scripts/pip.exe install torch==2.1.0 transformers==4.34.0 sentencepiece --no-cache-dir
-    ```
-    """)
-    sys.exit(1)
-except Exception as e:
-    st.error(f"""
-    ⚠️ Unexpected error: {str(e)}
-    
-    Please try:
-    1. Make sure you have enough disk space
-    2. Check your internet connection
-    3. Try restarting the application
-    """)
-    sys.exit(1)
 
+# ----------------------------------------------------------
+# Dataset Summary Generator
+# ----------------------------------------------------------
 def generate_data_summary(df: pd.DataFrame) -> str:
-    """Generate an AI-enhanced narrative summary of the dataset."""
-    # Extract basic statistics
+    """Generate summary stats and send to NVIDIA LLM API for AI enhancement."""
+    # Ask for API key only once from sidebar
+    api_key = os.getenv("NVIDIA_API_KEY")
+    if not api_key:
+        st.error("⚠️ NVIDIA API key not found. Please add it to your .env file as NVIDIA_API_KEY.")
+        st.stop()
+
+
     rows, cols = df.shape
     missing_values = int(df.isna().sum().sum())
     duplicates = int(df.duplicated().sum())
     missing_ratio = round((missing_values / (rows * cols)) * 100, 2) if rows * cols > 0 else 0
 
-    # Analyze column types
     num_cols = df.select_dtypes(include='number').columns.tolist()
     cat_cols = df.select_dtypes(exclude='number').columns.tolist()
 
-    # Correlation analysis
     corr_text = "No strong correlations detected."
     if len(num_cols) >= 2:
         corr = df[num_cols].corr()
@@ -108,188 +81,91 @@ def generate_data_summary(df: pd.DataFrame) -> str:
         if not corr_values.empty:
             top_pair = corr_values.index[0]
             corr_value = round(corr_values.iloc[0], 2)
-            corr_text = f"The strongest relationship (r = {corr_value}) is between `{top_pair[0]}` and `{top_pair[1]}`."
+            corr_text = f"The strongest correlation (r = {corr_value}) is between `{top_pair[0]}` and `{top_pair[1]}`."
 
-    # Generate narrative base
+    # Construct dataset narrative
     narrative = f"""
     Dataset Overview:
-    - The dataset has {rows} rows and {cols} columns.
-    - Contains {missing_values} missing values ({missing_ratio}% of data) and {duplicates} duplicate rows.
+    - {rows} rows, {cols} columns
+    - {missing_values} missing values ({missing_ratio}%)
+    - {duplicates} duplicate rows
 
     Numeric Insights:
-    - Numeric columns include {', '.join(num_cols[:5]) + (' and more' if len(num_cols) > 5 else '')}.
+    - Numeric columns: {', '.join(num_cols[:5]) + (' and more' if len(num_cols) > 5 else '')}
     - {corr_text}
 
     Categorical Insights:
-    - Key categorical columns are {', '.join(cat_cols[:5]) + (' and more' if len(cat_cols) > 5 else '')}.
+    - Key categorical columns: {', '.join(cat_cols[:5]) + (' and more' if len(cat_cols) > 5 else '')}
 
     Data Health:
-    - {'No duplicates detected.' if duplicates == 0 else f"{duplicates} duplicate rows found."}
-    - {missing_values} missing values need to be handled ({missing_ratio}% of total data points).
+    - {'No duplicates detected.' if duplicates == 0 else f"{duplicates} duplicates found."}
+    - {missing_values} missing values need attention.
     """
 
-    # Use AI to make it human-friendly if available
-    if summarizer is not None:
-        try:
-            # Set up maximum retries for robustness
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    ai_summary = summarizer(
-                        narrative,
-                        max_length=160,
-                        min_length=80,
-                        do_sample=False
-                    )[0]['summary_text']
-                    return ai_summary
-                except Exception as retry_error:
-                    if attempt == max_retries - 1:
-                        raise retry_error
-                    st.warning(f"Retrying AI summarization (attempt {attempt + 2}/{max_retries})...")
-                    continue
-        except Exception as e:
-            st.warning("⚠️ AI summarization failed. Falling back to standard narrative.")
-            return narrative
+    # Use NVIDIA API if key provided
+    if api_key:
+        return generate_ai_summary_via_nvidia(narrative, api_key)
     else:
-        st.info("ℹ️ Using standard narrative (AI model not available)")
-        return narrative
+        st.info("🔑 Please provide your NVIDIA API key in the sidebar to enable AI summarization.")
         return narrative
 
+
+# ----------------------------------------------------------
+# AI Summary Display (UI Styling)
+# ----------------------------------------------------------
 def display_ai_summary(summary_text: str, df=None):
-    """Display AI-generated insights in a narrative format with professional styling."""
-    st.markdown("## ✨ AI Insight Report")
+    """Beautifully display AI insights with color sections."""
+    st.markdown("## ✨ AI Insight Summary")
 
-    # Enhanced styling for narrative presentation
+    # Style definitions
     st.markdown("""
         <style>
-            .insight-box {
-                background-color: #101820;
-                color: #fafafa;
+            .insight-card {
+                background-color: #0f1a25;
+                color: #f1f1f1;
                 padding: 25px;
                 border-radius: 16px;
                 border: 1px solid #00bfa6;
-                font-size: 17px;
-                line-height: 1.8;
                 box-shadow: 0px 0px 10px rgba(0,191,166,0.4);
-                margin: 20px 0;
+                margin-bottom: 20px;
+                line-height: 1.8;
+                font-size: 17px;
             }
-            .insight-section {
-                background: rgba(255,255,255,0.05);
-                padding: 20px;
-                border-radius: 12px;
-                margin: 15px 0;
-                border-left: 4px solid;
-            }
-            .overview-section { border-color: #3498db; }
-            .numeric-section { border-color: #2ecc71; }
-            .categorical-section { border-color: #e67e22; }
-            .health-section { border-color: #e74c3c; }
             .section-title {
-                font-size: 1.2em;
-                color: #00bfa6;
-                margin-bottom: 10px;
+                font-size: 22px;
                 font-weight: 600;
-            }
-            .metric-value {
-                font-size: 2em;
-                font-weight: bold;
                 color: #00bfa6;
+                margin-top: 20px;
+                margin-bottom: 10px;
             }
-            .metric-label {
-                color: #95a5a6;
-                font-size: 0.9em;
+            .metric {
+                margin-left: 20px;
+                color: #cfd8dc;
             }
-            .info-tag {
-                display: inline-block;
-                padding: 4px 8px;
-                border-radius: 4px;
-                font-size: 0.9em;
-                margin: 2px 4px;
-            }
-            .tag-good { background: rgba(46,204,113,0.2); color: #2ecc71; }
-            .tag-warning { background: rgba(241,196,15,0.2); color: #f1c40f; }
-            .tag-alert { background: rgba(231,76,60,0.2); color: #e74c3c; }
         </style>
     """, unsafe_allow_html=True)
 
-    # Extract key metrics from DataFrame
-    total_rows = df.shape[0] if df is not None else 0
-    total_cols = df.shape[1] if df is not None else 0
-    
-    # Parse summary sections
-    overview_pattern = r"Dataset Overview:(.+?)(?=Numeric Insights:|$)"
-    numeric_pattern = r"Numeric Insights:(.+?)(?=Categorical Insights:|$)"
-    categorical_pattern = r"Categorical Insights:(.+?)(?=Data Health:|$)"
-    health_pattern = r"Data Health:(.+?)$"
+    # 🧩 Split the NVIDIA text by section headers (###)
+    sections = re.split(r"###\s*", summary_text)
+    formatted_html = ""
 
-    def extract_section(pattern, text):
-        match = re.search(pattern, text, re.DOTALL)
-        return match.group(1).strip() if match else ""
-
-    overview = extract_section(overview_pattern, summary_text)
-    numeric = extract_section(numeric_pattern, summary_text)
-    categorical = extract_section(categorical_pattern, summary_text)
-    health = extract_section(health_pattern, summary_text)
-
-    # Display sections in a narrative format
-    st.markdown(f"""
-        <div class="insight-box">
-            <div class="insight-section overview-section">
-                <div class="section-title">📘 Dataset Overview</div>
-                {overview.replace('-', '•')}
-            </div>
-            
-            <div class="insight-section numeric-section">
-                <div class="section-title">📊 Numeric Insights</div>
-                {numeric.replace('-', '•')}
-            </div>
-            
-            <div class="insight-section categorical-section">
-                <div class="section-title">🧩 Categorical Insights</div>
-                {categorical.replace('-', '•')}
-            </div>
-            
-            <div class="insight-section health-section">
-                <div class="section-title">🏥 Data Health</div>
-                {health.replace('-', '•')}
-            </div>
+    for section in sections:
+        if not section.strip():
+            continue
+        lines = section.strip().split("\n")
+        title = lines[0].replace("**", "").strip()
+        content = "<br>".join(lines[1:])
+        formatted_html += f"""
+        <div class="insight-card">
+            <div class="section-title">📘 {title}</div>
+            <div class="metric">{content}</div>
         </div>
-    """, unsafe_allow_html=True)
+        """
 
-    # Key Metrics Display
-    col1, col2, col3 = st.columns(3)
-    
-    # Extract metrics using regex
-    missing_match = re.search(r"(\d+)\s+missing", summary_text)
-    corr_match = re.search(r"r\s*=\s*(0\.\d+)", summary_text)
-    
-    missing_values = int(missing_match.group(1)) if missing_match else 0
-    correlation_value = float(corr_match.group(1)) if corr_match else 0.0
-    
-    # Calculate data quality score
-    missing_ratio = missing_values / (total_rows * total_cols) if total_rows * total_cols > 0 else 0
-    data_quality_score = round((1 - missing_ratio) * 100, 1)
+    st.markdown(formatted_html, unsafe_allow_html=True)
 
-    with col1:
-        st.metric("Total Records", f"{total_rows:,}", "Dataset Size")
-    with col2:
-        st.metric("Data Quality", f"{data_quality_score}%", 
-                 "Good" if data_quality_score > 95 else "Needs Attention")
-    with col3:
-        st.metric("Correlation Strength", f"{correlation_value * 100:.1f}%",
-                 "Strong" if correlation_value > 0.7 else "Moderate" if correlation_value > 0.4 else "Weak")
-
-    # Detailed Analysis Expander
-    with st.expander("🔬 View Detailed Analysis"):
-        if df is not None:
-            st.write("### 📈 Statistical Overview")
+    if df is not None:
+        with st.expander("🔬 View Dataset Overview"):
             st.dataframe(df.describe())
-            
-            if len(df.select_dtypes(include=['number']).columns) >= 2:
-                st.write("### 🔗 Correlation Matrix")
-                corr_matrix = df.select_dtypes(include=['number']).corr()
-                st.dataframe(corr_matrix.style.background_gradient(cmap='RdYlBu', vmin=-1, vmax=1))
 
-    st.caption("⚙️ Generated using Hugging Face DistilBART — 100% Free and Offline")
-    
-
+    st.caption("⚙️ Generated using NVIDIA Llama-4 Maverick LLM API")
