@@ -2,6 +2,11 @@ import pandas as pd
 import streamlit as st
 import re
 import sys
+import os
+# Allow model downloads for first initialization
+import torch
+import warnings
+warnings.filterwarnings('ignore')  # Suppress warnings
 
 def clean_text_for_pdf(text):
     """Clean text by replacing problematic characters with PDF-safe alternatives."""
@@ -19,23 +24,68 @@ def clean_text_for_pdf(text):
         text = text.replace(k, v)
     return text
 
-# Try to import transformers, showing a helpful error if it fails
+# Initialize global variable for the summarizer
+summarizer = None
+
+# Try to import and initialize transformers
 try:
+    import os
     from transformers import pipeline
+
+    # Check if running on Streamlit Cloud
+    if os.getenv("STREAMLIT_SERVER_PORT"):
+        print("Running on Streamlit Cloud - using lightweight mode")
+        summarizer = None
+    else:
+        print("Running locally - loading full AI model...")
+        # Set up torch configuration
+        torch.set_grad_enabled(False)  # Disable gradients for inference
+        device = 0 if torch.cuda.is_available() else -1  # Use GPU if available
+        
+        # Initialize with a smaller model for better compatibility
+        model_name = "sshleifer/distilbart-cnn-6-6"
+        try:
+            print("Loading model and tokenizer...")
+        
+            # Create the pipeline with the lightweight model
+            summarizer = pipeline(
+                "summarization",
+                model=model_name,
+                device=device
+            )
+    except Exception as model_error:
+        st.error(f"""
+        ⚠️ Error loading the AI model: {str(model_error)}
+        
+        Please try:
+        1. Check your internet connection
+        2. Clear your browser cache
+        3. Restart the application
+        """)
+        # Fallback to basic summarization
+        summarizer = None
+        
 except ImportError:
     st.error("""
-    ⚠️ The transformers package is not installed correctly.
+    ⚠️ Required packages are not installed correctly.
     
     Please run these commands in your terminal:
     ```
     D:/DataVista/.venv/Scripts/pip.exe install --upgrade pip
-    D:/DataVista/.venv/Scripts/pip.exe install torch transformers sentencepiece --no-cache-dir
+    D:/DataVista/.venv/Scripts/pip.exe install torch==2.1.0 transformers==4.34.0 sentencepiece --no-cache-dir
     ```
     """)
     sys.exit(1)
-
-# Initialize the summarizer model
-summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")  # Faster model
+except Exception as e:
+    st.error(f"""
+    ⚠️ Unexpected error: {str(e)}
+    
+    Please try:
+    1. Make sure you have enough disk space
+    2. Check your internet connection
+    3. Try restarting the application
+    """)
+    sys.exit(1)
 
 def generate_data_summary(df: pd.DataFrame) -> str:
     """Generate an AI-enhanced narrative summary of the dataset."""
@@ -78,17 +128,31 @@ def generate_data_summary(df: pd.DataFrame) -> str:
     - {missing_values} missing values need to be handled ({missing_ratio}% of total data points).
     """
 
-    # Use AI to make it human-friendly
-    try:
-        ai_summary = summarizer(
-            narrative,
-            max_length=160,
-            min_length=80,
-            do_sample=False
-        )[0]['summary_text']
-        return ai_summary
-    except Exception as e:
-        st.warning("⚠️ AI summarization failed. Falling back to standard narrative.")
+    # Use AI to make it human-friendly if available
+    if summarizer is not None:
+        try:
+            # Set up maximum retries for robustness
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    ai_summary = summarizer(
+                        narrative,
+                        max_length=160,
+                        min_length=80,
+                        do_sample=False
+                    )[0]['summary_text']
+                    return ai_summary
+                except Exception as retry_error:
+                    if attempt == max_retries - 1:
+                        raise retry_error
+                    st.warning(f"Retrying AI summarization (attempt {attempt + 2}/{max_retries})...")
+                    continue
+        except Exception as e:
+            st.warning("⚠️ AI summarization failed. Falling back to standard narrative.")
+            return narrative
+    else:
+        st.info("ℹ️ Using standard narrative (AI model not available)")
+        return narrative
         return narrative
 
 def display_ai_summary(summary_text: str, df=None):
