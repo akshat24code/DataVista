@@ -7,9 +7,8 @@ from utils.ai_insight import generate_data_summary, display_ai_summary
 from utils.data_cleaner import create_eda_report
 from utils.report_generator import generate_combined_report
 
-
 # ----------------------------------------------------------
-# Utility: Display AI summary if available
+# Utility: Display AI summary (legacy fallback)
 # ----------------------------------------------------------
 def display_legacy_summary(summary, df):
     """Display legacy AI summary fallback."""
@@ -29,12 +28,10 @@ def display_legacy_summary(summary, df):
     else:
         st.write(summary)
 
-
 # ----------------------------------------------------------
 # Streamlit Configuration
 # ----------------------------------------------------------
 st.set_page_config(page_title="DataVista", layout="wide")
-
 st.title("📊 DataVista — AI Insight Generator")
 st.caption("Upload your dataset → choose a report → get instant insights")
 
@@ -47,8 +44,7 @@ report_type = st.sidebar.selectbox(
     ["Data Summary", "Correlation Report", "Visual Analysis"],
 )
 
-df = None  # Initialize
-
+df = None
 
 # ----------------------------------------------------------
 # File Upload & Data Preparation
@@ -66,19 +62,20 @@ if uploaded_file:
             st.error("Please upload only CSV or Excel files.")
             st.stop()
 
-        # 🔹 Smart dtype correction (keeps numeric, date, string)
+        # 🔹 Smart dtype correction
         df = df.convert_dtypes()
 
-        # Fix mixed-type columns that break Arrow serialization
+        # 🔹 Fix mixed-type columns for Arrow (display safety)
         for col in df.columns:
-            if df[col].apply(lambda x: isinstance(x, str)).any() and df[col].apply(lambda x: not isinstance(x, str)).any():
+            unique_types = df[col].map(type).nunique()
+            if unique_types > 1:  # mixed data types
                 df[col] = df[col].astype(str)
 
-        # Convert nullable numeric dtypes to regular float
+        # 🔹 Convert nullable numeric dtypes to standard float
         for col in df.select_dtypes(include=["Int64", "Float64"]).columns:
             df[col] = df[col].astype(float)
 
-        # Auto-convert potential datetime columns
+        # 🔹 Auto-convert possible datetime columns
         for col in df.columns:
             if df[col].dtype == "object":
                 try:
@@ -93,9 +90,8 @@ else:
     st.info("👆 Upload a file to begin.")
     st.stop()
 
-
 # ----------------------------------------------------------
-# 1️⃣ DATA SUMMARY
+# 1️⃣ DATA SUMMARY (Safe Display + Real df intact)
 # ----------------------------------------------------------
 if report_type == "Data Summary":
     st.subheader("📘 Dataset Overview")
@@ -106,27 +102,41 @@ if report_type == "Data Summary":
     col3.metric("Missing Values", int(df.isna().sum().sum()))
     col4.metric("Duplicate Rows", int(df.duplicated().sum()))
 
-    st.write("### 🧱 Data Types")
-    st.dataframe(df.dtypes.rename("Type"))
+    # ---- Make a safe display copy (Arrow-compatible) ----
+    df_display = df.copy()
 
+    # Identify columns that have mixed data types
+    for col in df_display.columns:
+        unique_types = df_display[col].map(type).nunique()
+        if unique_types > 1:
+            df_display[col] = df_display[col].astype(str)
+
+    # ---- Data Types ----
+    st.write("### 🧱 Data Types")
+    dtype_df = pd.DataFrame({
+        "Column": df.columns,
+        "Data Type": df.dtypes.astype(str)
+    })
+    st.dataframe(dtype_df)
+
+    # ---- Missing Values ----
     st.write("### ⚠️ Missing Values by Column")
     missing = df.isna().sum()
-    st.dataframe(
-        pd.DataFrame(
-            {
-                "Column": missing.index,
-                "Missing Count": missing.values,
-                "Missing %": (missing.values / len(df) * 100).round(2),
-            }
-        )
-    )
+    missing_df = pd.DataFrame({
+        "Column": missing.index,
+        "Missing Count": missing.values,
+        "Missing %": (missing.values / len(df) * 100).round(2)
+    })
+    st.dataframe(missing_df)
 
-    st.write("### 📊 Statistical Summary")
+    # ---- Statistical Summary ----
+    st.write("### 📊 Statistical Summary (Display-Safe)")
     try:
-        st.dataframe(df.describe(include="all"))
+        st.dataframe(df_display.describe(include="all"))
     except Exception:
         st.warning("Could not display full summary due to mixed column types.")
 
+    # ---- AI Summary ----
     st.write("### 🤖 AI-Generated Summary")
     try:
         with st.spinner("Generating insights..."):
@@ -157,11 +167,10 @@ elif report_type == "Correlation Report":
     if numeric_df.shape[1] < 2:
         st.warning("At least two numeric columns are needed for correlation.")
     else:
-        corr = numeric_df.corr()
+        corr = numeric_df.corr(numeric_only=True)
         fig, ax = plt.subplots(figsize=(8, 6))
         sns.heatmap(corr, annot=True, cmap="coolwarm", ax=ax)
         st.pyplot(fig)
-
 
 # ----------------------------------------------------------
 # 3️⃣ VISUAL ANALYSIS
