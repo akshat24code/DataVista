@@ -3,6 +3,33 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from utils.ai_insight import generate_data_summary, display_ai_summary
+from utils.data_cleaner import create_eda_report
+from utils.report_generator import generate_combined_report
+
+
+
+def display_legacy_summary(summary, df):
+    """Display the AI-generated summary in a structured way."""
+    if isinstance(summary, dict):
+        # Display key metrics in columns
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Rows", summary.get('total_rows', 0))
+            st.metric("Missing Values", summary.get('missing_values', 0))
+        with col2:
+            st.metric("Total Columns", summary.get('total_columns', 0))
+            st.metric("Duplicate Rows", summary.get('duplicate_rows', 0))
+        
+        # Show column types
+        if summary.get('numeric_columns'):
+            st.write("📊 **Numeric Columns:**", ", ".join(summary['numeric_columns']))
+        if summary.get('categorical_columns'):
+            st.write("📝 **Categorical Columns:**", ", ".join(summary['categorical_columns']))
+    else:
+        # If summary is a string, display it directly
+        st.write(summary)
+
 
 st.set_page_config(page_title="DataVista", layout="wide")
 
@@ -61,6 +88,27 @@ if report_type == "Data Summary":
 
     st.write("### 📊 Statistical Summary:")
     st.write(df.describe())
+
+    st.write("### 🤖 AI-Generated Summary:")
+    try:
+        with st.spinner("Generating insights..."):
+            summary = generate_data_summary(df)
+            display_ai_summary(summary, df)  # Using enhanced version from ai_insight.py
+            
+            # Add full AI report generation button
+            if st.button("📄 Generate Full AI Report (PDF)"):
+                with st.spinner("Generating detailed AI Report..."):
+                    file_path = generate_combined_report(summary, df)
+                    with open(file_path, "rb") as f:
+                        st.download_button(
+                            label="⬇️ Download Full Report (PDF)",
+                            data=f,
+                            file_name="DataVista_Full_Report.pdf",
+                            mime="application/pdf"
+                        )
+    except Exception as e:
+        st.warning(f"Could not generate AI summary: {e}")
+
 
 # -------------------------
 # 2️⃣ CORRELATION REPORT
